@@ -1,4 +1,4 @@
-﻿using Grpc.Net.Client;
+using Grpc.Net.Client;
 using LibBox;
 using Newtonsoft.Json;
 using System;
@@ -44,9 +44,9 @@ namespace ControlBox
             return await CallService<ReturnMessage>(Constant.SystemService.Name, Constant.SystemService.Install, MessageHelper.ParamJson(installMessage));
         }
 
-        public async Task<ReturnMessage?> Uninstall(InstallMessage installMessage)
+        public async Task<ReturnMessage?> Uninstall(UninstallMessage uninstallMessage)
         {
-            return await CallService<ReturnMessage>(Constant.SystemService.Name, Constant.SystemService.Uninstall, MessageHelper.ParamJson(installMessage));
+            return await CallService<ReturnMessage>(Constant.SystemService.Name, Constant.SystemService.Uninstall, MessageHelper.ParamJson(uninstallMessage));
         }
 
         public async Task<List<ServiceMetaData>?> List()
@@ -54,13 +54,13 @@ namespace ControlBox
             return await CallService<List<ServiceMetaData>>(Constant.SystemService.Name, Constant.SystemService.List, string.Empty);
         }
 
-        private async Task<T?> CallService<T>(string serviceName, string functionName, string inputData)
+        public async Task<T?> CallService<T>(string serviceName, string functionName, string inputData)
         {
             var rpcMessage = await Call(serviceName, functionName, inputData);
             return JsonConvert.DeserializeObject<T>(rpcMessage?.Data ?? string.Empty);
         }
 
-        private async Task<RpcMessage?> Call(string serviceName, string functionName, string inputData)
+        public async Task<RpcMessage?> Call(string serviceName, string functionName, string inputData)
         {
             return await Call(new RpcMessage { Service = serviceName, Function = functionName, Data = inputData });
         }
