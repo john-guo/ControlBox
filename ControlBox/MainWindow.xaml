@@ -1,4 +1,4 @@
-﻿<Window x:Class="ControlBox.MainWindow"
+<Window x:Class="ControlBox.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -21,7 +21,8 @@
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
         <WrapPanel Grid.Row="0" Grid.ColumnSpan="3">
-            <Button Command="{Binding ListCommand, IsAsync=True}">Query</Button>
+            <Button Margin="2" Command="{Binding ListCommand, IsAsync=True}">Query</Button>
+            <Button Margin="2" Command="{Binding OpenInstallCommand}">Install...</Button>
         </WrapPanel>
         <GridSplitter Grid.Column="1" Grid.Row="1" Width="1"/>
         <TreeView ItemsSource="{Binding Services}" Grid.Row="1" Grid.Column="0" >
@@ -41,6 +42,17 @@
                 </HierarchicalDataTemplate>
             </TreeView.Resources>
         </TreeView>
-        <local:PropertyEditor Grid.Row="1" Grid.Column="2" DataContextObject="{Binding Function}"/>
+        <Grid Grid.Row="1" Grid.Column="2">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <local:CallEditor Grid.Row="0" DataContext="{Binding CallData}"/>
+            <WrapPanel Grid.Row="1" HorizontalAlignment="Right">
+                <Button Margin="2" Command="{Binding CallCommand}">Call</Button>
+                <Button Margin="2" Command="{Binding UninstallCommand}">Uninstall</Button>
+            </WrapPanel>
+        </Grid>
+        
     </Grid>
 </Window>
