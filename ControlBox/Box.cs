@@ -1,4 +1,4 @@
-﻿using Grpc.Core;
+using Grpc.Core;
 using Grpc.Net.Client;
 using LibBox;
 using Microsoft.AspNetCore.Builder;
@@ -14,6 +14,7 @@ using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -24,6 +25,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 using System.Text;
 using System.Threading.Tasks;
+using System.Windows.Documents;
 
 namespace ControlBox
 {
@@ -85,7 +87,7 @@ namespace ControlBox
 
         internal readonly ConcurrentDictionary<string, RegisterExecutorInfo> _info = [];
 
-        public void RegisterServiceExecutor(IExecutor executor)
+        public string RegisterServiceExecutor(IExecutor executor)
         {
             var t = executor.GetType();
             var sattr = t.GetCustomAttribute<ServiceAttribute>();
@@ -101,6 +103,7 @@ namespace ControlBox
                 var aname = sfattr!.Name;
                 entry.Functions.Add(aname, new FunctionInfo(serviceFunction.CreateDelegate<Func<string, string>>(executor)));
             }
+            return name;
         }
 
         public void UnregisterServiceExecutor(string name)
@@ -193,6 +196,19 @@ namespace ControlBox
         public required string[] Filenames { get; set; }
     }
 
+    public record UninstallMessage
+    {
+        public required string ServiceName { get; set; }
+    }
+
+    public class InstalledAddin
+    {
+        public string MainDll { get; set; }
+        public List<string> Filenames { get; set; }
+        public List<string> ServiceNames { get; set; }
+    }
+
+
     public class InputMetaData
     {
         public string Name { get; set; }
@@ -240,12 +256,16 @@ namespace ControlBox
         }
 
         [ServiceFunction(nameof(Constant.SystemService.Install), InputType = typeof(InstallMessage))]
-        public string Install (string input)
+        public string Install(string input)
         {
             var install = JsonConvert.DeserializeObject<InstallMessage>(input);
             if (install == null)
             {
                 return MessageHelper.ErrorJson("input is null");
+            }
+            if (Box.IsAddinInstalled(install.MainDll))
+            {
+                return MessageHelper.ErrorJson($"{install.MainDll} has already installed.");
             }
 
             foreach (var file in install.Filenames)
@@ -254,16 +274,16 @@ namespace ControlBox
                 if (!File.Exists(filepath))
                     return MessageHelper.ErrorJson($"file {file} was not found");
             }
-            var mainpath = Path.Combine("extra", install.MainDll); 
-            if (!File.Exists(mainpath))
-                return MessageHelper.ErrorJson($"maindll {mainpath} was not found");
-
             foreach (var file in install.Filenames)
             {
                 var fromfilepath = Path.Combine("temp", file);
                 var tofilepath = Path.Combine("extra", file);
                 File.Move(fromfilepath, tofilepath, true);
             }
+
+            var mainpath = Path.Combine("extra", install.MainDll);
+            if (!File.Exists(mainpath))
+                return MessageHelper.ErrorJson($"maindll {mainpath} was not found");
 
             try
             {
@@ -277,23 +297,30 @@ namespace ControlBox
             return MessageHelper.SuccessJson("Install OK");
         }
 
-        [ServiceFunction(Constant.SystemService.Uninstall, InputType = typeof(InstallMessage))]
+        [ServiceFunction(Constant.SystemService.Uninstall, InputType = typeof(UninstallMessage))]
         public string Uninstall(string input)
         {
-            var install = JsonConvert.DeserializeObject<InstallMessage>(input);
+            var install = JsonConvert.DeserializeObject<UninstallMessage>(input);
             if (install == null)
             {
                 return MessageHelper.ErrorJson("input is null");
             }
-
-            Box.UnloadAddin(install);
-
-            foreach (var file in install.Filenames)
+            var dllname = Box.GetDllFromService(install.ServiceName);
+            if (string.IsNullOrEmpty(dllname) || !Box.IsAddinInstalled(dllname))
             {
-                var filepath = Path.Combine("extra", file);
-                if (!File.Exists(filepath))
-                    continue;
-                File.Delete(filepath);
+                return MessageHelper.ErrorJson($"{install.ServiceName} has not installed.");
+            }
+
+            var uninstalladdin = Box.UnloadAddin(dllname);
+            if (uninstalladdin != null)
+            {
+                foreach (var file in uninstalladdin.Filenames)
+                {
+                    var filepath = Path.Combine("extra", file);
+                    if (!File.Exists(filepath))
+                        continue;
+                    File.Delete(filepath);
+                }
             }
 
             return MessageHelper.SuccessJson("Uninstall OK");
@@ -336,7 +363,7 @@ namespace ControlBox
     public class AddinManager
     {
         private const string AddinConfig = "addins.json";
-        private readonly List<InstallMessage> _addins = [];
+        private readonly ConcurrentDictionary<string, InstalledAddin> _addins = [];
         private readonly ConcurrentDictionary<string, AssemblyLoadContext> _assemblyLoadContexts = [];
         private readonly string baseDir;
 
@@ -346,24 +373,46 @@ namespace ControlBox
             Load(); 
         }
 
-        public void Add(InstallMessage addin)
+        public bool IsInstalled(string maindll)
         {
-            lock(_addins)
-            {
-                _addins.Add(addin);
-                Save();
-            }
-            Load(addin.MainDll);
+            return _addins.TryGetValue(maindll, out _);
         }
 
-        public void Remove(InstallMessage addin)
+        public void Add(InstallMessage addin)
         {
-            Unload(addin.MainDll);
-            lock (_addins)
+            var installedAddin = new InstalledAddin()
             {
-                _addins.Remove(addin);
-                Save();
+                MainDll = addin.MainDll,
+                Filenames = [.. addin.Filenames],
+                ServiceNames = [.. Load(addin.MainDll)]
+            };
+
+            if (!installedAddin.ServiceNames.Any())
+            {
+                throw new Exception("no service");
             }
+
+            _addins.TryAdd(installedAddin.MainDll, installedAddin);
+            Save();
+        }
+
+        public InstalledAddin Remove(string dllmain)
+        {
+            InstalledAddin item;
+            Unload(dllmain);
+            _addins.TryRemove(dllmain, out item);
+            Save();
+            return item;
+        }
+
+        public string GetDllFromService(string serviceName)
+        {
+            foreach (var pair in _addins)
+            {
+                if (pair.Value.ServiceNames.Contains(serviceName))
+                    return pair.Key;
+            }
+            return null;
         }
 
         private void Load()
@@ -371,25 +420,25 @@ namespace ControlBox
             if (!File.Exists(AddinConfig))
                 return;
             var json = File.ReadAllText(AddinConfig);
-            var list = JsonConvert.DeserializeObject<List<InstallMessage>>(json);
+            var dict = JsonConvert.DeserializeObject<Dictionary<string, InstalledAddin>>(json);
             _addins.Clear();
-            if (list != null)
+            if (dict != null)
             {
-                _addins.AddRange(list);
-            }
-            foreach (var addin in _addins)
-            {
-                Load(addin.MainDll);
+                foreach (var pair in dict)
+                {
+                    _addins.TryAdd(pair.Key, pair.Value);
+                    Load(pair.Key);
+                }
             }
         }
 
-        private void Load(string dllname)
+        private string[] Load(string dllname)
         {
+            List<string> serviceNames = [];
             var mainpath = Path.Combine(baseDir, "extra", dllname);
+            var ctx = new AssemblyLoadContext(mainpath, true);
             try
             {
-                var ctx = new AssemblyLoadContext(mainpath, true);
-                _assemblyLoadContexts.TryAdd(mainpath, ctx);
                 ctx.Resolving += (assemblyLoadContext, assemblyName) =>
                 {
                     var dependencyPath = Path.Combine(baseDir, "extra", $"{assemblyName.Name}.dll");
@@ -400,31 +449,49 @@ namespace ControlBox
                 foreach (var executorType in allExecutors)
                 {
                     var executor = Activator.CreateInstance(executorType);
-                    Box.Register(executor);
+                    serviceNames.Add(Box.Register(executor));
                 }
             }
             catch
             {
-                try
-                {
-                    Box.Unregister(mainpath);
-                    if (_assemblyLoadContexts.TryRemove(mainpath, out var ctx))
-                    {
-                        ctx.Unload();
-                    }
-                }
-                catch { }
+                UnloadContext(ref ctx);
                 throw;
             }
+
+            if (!serviceNames.Any())
+            {
+                UnloadContext(ref ctx);
+            }
+            else
+            {
+                _assemblyLoadContexts.TryAdd(dllname, ctx);
+            }
+            return serviceNames.ToArray();
         }
 
+        private void UnloadContext(ref AssemblyLoadContext ctx)
+        {
+            var weakRef = new WeakReference(ctx, false);
+            ctx.Unload();
+            ctx = null;
+            for (int i = 0; weakRef.IsAlive && i < 10; ++i)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                Debug.WriteLine(i);
+            }
+        }
+        
         private void Unload(string dllname)
         {
-            var mainpath = Path.Combine("extra", dllname);
-            Box.Unregister(mainpath);
-            if (_assemblyLoadContexts.TryRemove(mainpath, out var ctx))
+            _addins.TryGetValue(dllname, out var installedAddin);
+            foreach (var name in installedAddin.ServiceNames)
             {
-                ctx.Unload();
+                Box.Unregister(name);
+            }
+            if (_assemblyLoadContexts.TryRemove(dllname, out var ctx))
+            {
+                UnloadContext(ref ctx);
             }
         }
 
@@ -443,17 +510,27 @@ namespace ControlBox
 
         public static IServiceProvider? Services => webApplication?.Services;
 
-        public static void Register(object? service)
+        public static string Register(object? service)
         {
             var executor = service as IExecutor;
             if (executor == null)
-                return;
-            serviceExecutor!.RegisterServiceExecutor(executor);
+                return null;
+            return serviceExecutor!.RegisterServiceExecutor(executor);
         }
 
-        public static void Unregister(string name)
+        public static void Unregister(string serviceName)
         {
-            serviceExecutor!.UnregisterServiceExecutor(name);
+            serviceExecutor!.UnregisterServiceExecutor(serviceName);
+        }
+
+        public static bool IsAddinInstalled(string dllName)
+        {
+            return addinManager?.IsInstalled(dllName) ?? false;
+        }
+
+        public static string GetDllFromService(string serviceName)
+        {
+            return addinManager?.GetDllFromService(serviceName);
         }
 
         public static void LoadAddin(InstallMessage addin)
@@ -461,9 +538,9 @@ namespace ControlBox
             addinManager?.Add(addin);
         }
 
-        public static void UnloadAddin(InstallMessage addin)
+        public static InstalledAddin? UnloadAddin(string dllName)
         {
-            addinManager?.Remove(addin);
+            return addinManager?.Remove(dllName);
         }
 
 
